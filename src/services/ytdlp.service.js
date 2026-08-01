@@ -2,12 +2,35 @@ const fs = require("fs");
 const path = require("path");
 const { execFile, spawn } = require("child_process");
 const axios = require("axios");
-const ffmpegPath = require("ffmpeg-static");
+const ffmpegStatic = require("ffmpeg-static");
 
 const BIN_DIR = path.join(__dirname, "../../bin");
 const IS_WINDOWS = process.platform === "win32";
 const BIN_NAME = IS_WINDOWS ? "yt-dlp.exe" : "yt-dlp";
 const BIN_PATH = path.join(BIN_DIR, BIN_NAME);
+
+// Use system ffmpeg if installed (e.g. Docker container), fallback to ffmpeg-static
+const ffmpegPath = (() => {
+  if (fs.existsSync("/usr/bin/ffmpeg")) return "/usr/bin/ffmpeg";
+  if (fs.existsSync("/usr/local/bin/ffmpeg")) return "/usr/local/bin/ffmpeg";
+  return ffmpegStatic;
+})();
+
+// Anti-bot & cloud datacenter bypass arguments for yt-dlp
+const YTDLP_BYPASS_ARGS = [
+  "--no-warnings",
+  "--no-check-certificates",
+  "--user-agent",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+  "--extractor-args",
+  "youtube:player_client=ios,mweb;player_skip=webpage,configs",
+];
+
+function getSystemYtDlp() {
+  if (fs.existsSync("/usr/local/bin/yt-dlp")) return "/usr/local/bin/yt-dlp";
+  if (fs.existsSync("/usr/bin/yt-dlp")) return "/usr/bin/yt-dlp";
+  return null;
+}
 
 // Ensure bin directory exists
 if (!fs.existsSync(BIN_DIR)) {
@@ -18,6 +41,11 @@ if (!fs.existsSync(BIN_DIR)) {
  * Downloads yt-dlp executable if it does not exist locally.
  */
 async function ensureBinary() {
+  const sysBin = getSystemYtDlp();
+  if (sysBin) {
+    return sysBin;
+  }
+
   if (fs.existsSync(BIN_PATH)) {
     return BIN_PATH;
   }
@@ -117,9 +145,8 @@ async function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
     const args = [
       "-j",
-      "--no-warnings",
       "--no-playlist",
-      "--no-check-certificates",
+      ...YTDLP_BYPASS_ARGS,
       url,
     ];
 
@@ -321,9 +348,8 @@ function getCdnUrls(videoUrl, formatSpec, binPath) {
       [
         "-g",
         "-f", formatSpec,
-        "--no-warnings",
-        "--no-check-certificates",
         "--no-playlist",
+        ...YTDLP_BYPASS_ARGS,
         videoUrl,
       ],
       { maxBuffer: 1024 * 1024 * 10 },
@@ -425,8 +451,7 @@ async function createStreamProcess(videoUrl, formatId, kind = "video", resolutio
     "-f", formatSpec,
     "-o", "-",
     "--no-playlist",
-    "--no-warnings",
-    "--no-check-certificates",
+    ...YTDLP_BYPASS_ARGS,
     "--ffmpeg-location", ffmpegPath,
     videoUrl,
   ];
