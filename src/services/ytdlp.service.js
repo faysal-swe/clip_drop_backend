@@ -245,39 +245,54 @@ function normalizeVideoInfo(rawJson, rawUrl) {
   const formatsList = [];
   const rawFormats = Array.isArray(rawJson.formats) ? rawJson.formats : [];
 
-  // Group all video formats by height so every resolution (including video-only 1080p, 1440p, 4K, 720p, etc.) is captured
+  // Group all video formats by height so every resolution (including pre-muxed HD/SD, 1080p, 720p, etc.) is captured
   const videoByHeight = new Map();
 
   for (const f of rawFormats) {
     if (!f) continue;
-    const hasVideo = f.vcodec && f.vcodec !== "none";
-    if (!hasVideo) continue;
 
-    const height = f.height || (f.format_note ? parseInt(f.format_note, 10) : 0);
-    if (!height || isNaN(height)) continue;
+    // Skip audio-only formats
+    const isAudioOnly = f.vcodec === "none";
+    if (isAudioOnly) continue;
 
-    const hasAudio = Boolean(f.acodec && f.acodec !== "none");
+    const formatId = String(f.format_id || "");
+    let height = f.height || (f.format_note ? parseInt(f.format_note, 10) : 0);
+
+    // Special handling for Facebook & legacy platforms with named formats ('hd', 'sd')
+    if (!height) {
+      if (formatId === "hd" || /hd/i.test(f.format_note || "")) height = 720;
+      else if (formatId === "sd" || /sd/i.test(f.format_note || "")) height = 480;
+    }
+
+    if (!height && f.vcodec === undefined && f.acodec === undefined && !f.url) continue;
+
+    const hasAudio = Boolean(f.acodec && f.acodec !== "none") || formatId === "hd" || formatId === "sd";
     const ext = (f.ext || "").toLowerCase();
     const vcodec = (f.vcodec || "").toLowerCase();
     const size = f.filesize || f.filesize_approx || 0;
     const tbr = f.tbr || 0;
     const fps = f.fps || 0;
 
-    // Prefer mp4 container, avc1/h264 codec, higher fps/bitrate
+    // Prefer pre-muxed audio+video, mp4 container, avc1/h264 codec, named HD/SD formats
     let score = 0;
+    if (hasAudio) score += 200; // Strongly prefer pre-muxed audio+video formats
     if (ext === "mp4") score += 100;
     if (vcodec.startsWith("avc1") || vcodec.startsWith("h264")) score += 50;
+    if (formatId === "hd" || formatId === "sd") score += 80;
     if (fps >= 50) score += 20;
     score += Math.min(tbr, 50);
 
-    const existing = videoByHeight.get(height);
+    const keyHeight = height || (formatId === "hd" ? 720 : formatId === "sd" ? 480 : 360);
+
+    const existing = videoByHeight.get(keyHeight);
     if (!existing || score > existing.score || (score === existing.score && size > existing.size)) {
-      videoByHeight.set(height, {
+      videoByHeight.set(keyHeight, {
         format: f,
         score,
         size,
-        height,
+        height: keyHeight,
         hasAudio,
+        formatId: formatId || (keyHeight >= 720 ? "hd" : "sd"),
       });
     }
   }
@@ -286,13 +301,13 @@ function normalizeVideoInfo(rawJson, rawUrl) {
   for (const [height, data] of videoByHeight.entries()) {
     const f = data.format;
     formatsList.push({
-      id: String(f.format_id),
+      id: data.formatId,
       kind: "video",
       label: `${height}p`,
       container: "mp4",
       fileSize: formatBytes(data.size),
       url: f.url,
-      formatId: String(f.format_id),
+      formatId: data.formatId,
       videoUrl: rawUrl,
       resolution: height,
       needsMux: !data.hasAudio,
