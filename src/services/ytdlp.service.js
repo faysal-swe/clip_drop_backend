@@ -17,14 +17,50 @@ const ffmpegPath = (() => {
 })();
 
 // Anti-bot & cloud datacenter bypass arguments for yt-dlp
-const YTDLP_BYPASS_ARGS = [
-  "--no-warnings",
-  "--no-check-certificates",
-  "--user-agent",
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
-  "--extractor-args",
-  "youtube:player_client=ios,mweb;player_skip=webpage,configs",
-];
+function getCookieFilePath() {
+  const envCookies = process.env.YOUTUBE_COOKIES || process.env.YTDLP_COOKIES;
+  const tempCookiesPath = path.join(BIN_DIR, "cookies.txt");
+  const rootCookiesPath = path.join(__dirname, "../../cookies.txt");
+
+  if (envCookies) {
+    try {
+      fs.writeFileSync(tempCookiesPath, envCookies, "utf8");
+      return tempCookiesPath;
+    } catch (e) {
+      console.error("[ytdlp] Failed to write cookies from ENV:", e.message);
+    }
+  }
+
+  if (fs.existsSync(tempCookiesPath)) return tempCookiesPath;
+  if (fs.existsSync(rootCookiesPath)) return rootCookiesPath;
+  return null;
+}
+
+function getYtDlpBypassArgs() {
+  const args = [
+    "--no-warnings",
+    "--no-check-certificates",
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "--extractor-args",
+    "youtube:player_client=tv,mweb,android;player_skip=webpage,configs",
+  ];
+
+  const cookieFile = getCookieFilePath();
+  if (cookieFile) {
+    console.log(`[ytdlp] Using cookies file: ${cookieFile}`);
+    args.push("--cookies", cookieFile);
+  }
+
+  const proxy = process.env.RESIDENTIAL_PROXY_URL || process.env.PROXY_URL || process.env.YTDLP_PROXY;
+  if (proxy) {
+    const safeProxyLog = proxy.replace(/:\/\/(.*):(.*)@/, "://$1:****@");
+    console.log(`[ytdlp] Routing through Residential Proxy: ${safeProxyLog}`);
+    args.push("--proxy", proxy);
+  }
+
+  return args;
+}
 
 function getSystemYtDlp() {
   if (fs.existsSync("/usr/local/bin/yt-dlp")) return "/usr/local/bin/yt-dlp";
@@ -146,7 +182,7 @@ async function fetchMetadata(url) {
     const args = [
       "-j",
       "--no-playlist",
-      ...YTDLP_BYPASS_ARGS,
+      ...getYtDlpBypassArgs(),
       url,
     ];
 
@@ -349,7 +385,7 @@ function getCdnUrls(videoUrl, formatSpec, binPath) {
         "-g",
         "-f", formatSpec,
         "--no-playlist",
-        ...YTDLP_BYPASS_ARGS,
+        ...getYtDlpBypassArgs(),
         videoUrl,
       ],
       { maxBuffer: 1024 * 1024 * 10 },
@@ -451,7 +487,7 @@ async function createStreamProcess(videoUrl, formatId, kind = "video", resolutio
     "-f", formatSpec,
     "-o", "-",
     "--no-playlist",
-    ...YTDLP_BYPASS_ARGS,
+    ...getYtDlpBypassArgs(),
     "--ffmpeg-location", ffmpegPath,
     videoUrl,
   ];

@@ -46,6 +46,9 @@ async function fetchInfo(req, res) {
     } else if (error.message.includes("Copyright") || error.message.includes("blocked")) {
       code = "copyright_restricted";
       message = "This video is restricted and cannot be downloaded.";
+    } else if (error.message.includes("Sign in to confirm") || error.message.includes("not a bot")) {
+      code = "bot_verification_required";
+      message = "YouTube blocked the server request with a bot check. Cookies or authentication required.";
     }
 
     return res.status(500).json({
