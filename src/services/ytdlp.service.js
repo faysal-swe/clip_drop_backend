@@ -16,6 +16,8 @@ const ffmpegPath = (() => {
   return ffmpegStatic;
 })();
 
+const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
 // Anti-bot & cloud datacenter bypass arguments for yt-dlp
 function getCookieFilePath() {
   const envCookies = process.env.YOUTUBE_COOKIES || process.env.YTDLP_COOKIES;
@@ -41,7 +43,7 @@ function getYtDlpBypassArgs() {
     "--no-warnings",
     "--no-check-certificates",
     "--user-agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    DEFAULT_USER_AGENT,
     "--extractor-args",
     "youtube:player_client=tv,mweb,android;player_skip=webpage,configs",
   ];
@@ -422,11 +424,11 @@ function getCdnUrls(videoUrl, formatSpec, binPath) {
 /**
  * Zero-Storage Direct Proxy Stream
  *
- * Spawns yt-dlp to stream content directly from platform CDNs into standard output,
+ * Spawns FFmpeg directly using CDN URLs extracted via yt-dlp -g,
  * piping byte-by-byte into FFmpeg for fragmented MP4 packaging (-movflags frag_keyframe+empty_moov).
  *
  * Absolute Zero Disk Storage: No file is created on server disk drives.
- * Flow: Platform CDN → yt-dlp (RAM stream) → FFmpeg (RAM pipe) → HTTP Response → Client Device
+ * Flow: Platform CDN → FFmpeg (RAM pipe) → HTTP Response → Client Device
  */
 async function createStreamProcess(videoUrl, formatId, kind = "video", resolution = 0, container = "mp4") {
   const binPath = await ensureBinary();
@@ -434,16 +436,31 @@ async function createStreamProcess(videoUrl, formatId, kind = "video", resolutio
   const safeContainer = (container || (kind === "audio" ? "mp3" : "mp4")).toLowerCase();
 
   let formatSpec;
-  let ffmpegArgs = [];
-
   if (kind === "audio") {
     formatSpec = "bestaudio/best";
+  } else {
+    // kind === "video"
+    if (formatId && formatId !== "best") {
+      formatSpec = `${formatId}+bestaudio/${formatId}/best`;
+    } else if (numericRes > 0) {
+      formatSpec = `bestvideo[height<=${numericRes}]+bestaudio/best[height<=${numericRes}]/best`;
+    } else {
+      formatSpec = "bestvideo+bestaudio/best";
+    }
+  }
 
+  console.log(`[stream] Fetching CDN URLs (kind: "${kind}", container: "${safeContainer}", formatSpec: "${formatSpec}")...`);
+  const urls = await getCdnUrls(videoUrl, formatSpec, binPath);
+
+  let ffmpegArgs = [];
+  if (kind === "audio") {
+    const url = urls[0];
     if (safeContainer === "mp3") {
       const bitrate = formatId === "audio_mp3_128" ? "128k" : "320k";
       ffmpegArgs = [
         "-loglevel", "warning",
-        "-i", "pipe:0",
+        "-user_agent", DEFAULT_USER_AGENT,
+        "-i", url,
         "-vn",
         "-c:a", "libmp3lame",
         "-b:a", bitrate,
@@ -453,7 +470,8 @@ async function createStreamProcess(videoUrl, formatId, kind = "video", resolutio
     } else if (safeContainer === "wav") {
       ffmpegArgs = [
         "-loglevel", "warning",
-        "-i", "pipe:0",
+        "-user_agent", DEFAULT_USER_AGENT,
+        "-i", url,
         "-vn",
         "-c:a", "pcm_s16le",
         "-f", "wav",
@@ -463,7 +481,8 @@ async function createStreamProcess(videoUrl, formatId, kind = "video", resolutio
       // m4a / aac
       ffmpegArgs = [
         "-loglevel", "warning",
-        "-i", "pipe:0",
+        "-user_agent", DEFAULT_USER_AGENT,
+        "-i", url,
         "-vn",
         "-c:a", "aac",
         "-b:a", "192k",
@@ -474,68 +493,54 @@ async function createStreamProcess(videoUrl, formatId, kind = "video", resolutio
     }
   } else {
     // kind === "video"
-    if (formatId && formatId !== "best") {
-      formatSpec = `${formatId}+bestaudio/${formatId}/best`;
-    } else if (numericRes > 0) {
-      formatSpec = `bestvideo[height<=${numericRes}]+bestaudio/best[height<=${numericRes}]/best`;
+    if (urls.length >= 2) {
+      ffmpegArgs = [
+        "-loglevel", "warning",
+        "-user_agent", DEFAULT_USER_AGENT,
+        "-i", urls[0],
+        "-user_agent", DEFAULT_USER_AGENT,
+        "-i", urls[1],
+        "-map", "0:v",
+        "-map", "1:a?",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "frag_keyframe+empty_moov",
+        "-f", "mp4",
+        "pipe:1"
+      ];
     } else {
-      formatSpec = "bestvideo+bestaudio/best";
+      ffmpegArgs = [
+        "-loglevel", "warning",
+        "-user_agent", DEFAULT_USER_AGENT,
+        "-i", urls[0],
+        "-map", "0:v",
+        "-map", "0:a?",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "frag_keyframe+empty_moov",
+        "-f", "mp4",
+        "pipe:1"
+      ];
     }
-
-    // Always transcode audio to standard AAC 192k to guarantee universal audio playback across all devices/players
-    ffmpegArgs = [
-      "-loglevel", "warning",
-      "-i", "pipe:0",
-      "-c:v", "copy",
-      "-c:a", "aac",
-      "-b:a", "192k",
-      "-movflags", "frag_keyframe+empty_moov",
-      "-f", "mp4",
-      "pipe:1"
-    ];
   }
 
-  console.log(`[stream] Spawning zero-storage yt-dlp direct pipe (kind: "${kind}", container: "${safeContainer}", format: "${formatSpec}")...`);
+  const proxy = process.env.RESIDENTIAL_PROXY_URL || process.env.PROXY_URL || process.env.YTDLP_PROXY;
+  const spawnEnv = { ...process.env };
+  if (proxy) {
+    spawnEnv.http_proxy = proxy;
+    spawnEnv.https_proxy = proxy;
+    spawnEnv.HTTP_PROXY = proxy;
+    spawnEnv.HTTPS_PROXY = proxy;
+  }
 
-  // Step 1: Spawn yt-dlp directly with stdout pipe (-o -)
-  const ytdlpArgs = [
-    "-f", formatSpec,
-    "-o", "-",
-    "--no-playlist",
-    ...getYtDlpBypassArgs(),
-    "--ffmpeg-location", ffmpegPath,
-    videoUrl,
-  ];
+  console.log(`[stream] Spawning zero-storage FFmpeg direct stream process (kind: "${kind}", urls: ${urls.length})...`);
+  const ffmpegProc = spawn(ffmpegPath, ffmpegArgs, { env: spawnEnv });
 
-  const ytdlpProc = spawn(binPath, ytdlpArgs);
-
-  // Step 2: Spawn FFmpeg to transcode/package in-memory stream into HTTP output
-  const ffmpegProc = spawn(ffmpegPath, ffmpegArgs);
-
-  // Pipe yt-dlp stdout into FFmpeg stdin
-  ytdlpProc.stdout.pipe(ffmpegProc.stdin);
-
-  // Log warnings if any
-  ytdlpProc.stderr.on("data", (chunk) => {
-    const msg = chunk.toString().trim();
-    if (msg && !msg.includes("[download]") && !msg.includes("Resuming")) {
-      console.error("[yt-dlp stream log]:", msg);
-    }
+  ffmpegProc.on("error", (err) => {
+    console.error("[ffmpeg process error]:", err.message);
   });
-
-  ytdlpProc.on("error", (err) => {
-    console.error("[yt-dlp stream process error]:", err.message);
-    if (!ffmpegProc.killed) ffmpegProc.kill("SIGTERM");
-  });
-
-  ffmpegProc.stdin.on("error", (err) => {
-    if (err.code !== "EPIPE") {
-      console.error("[ffmpeg stdin error]:", err.message);
-    }
-  });
-
-  // Attach ytdlpProc reference to ffmpegProc so controller can kill both on abort
-  ffmpegProc.ytdlpProc = ytdlpProc;
 
   return ffmpegProc;
 }
